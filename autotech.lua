@@ -51,9 +51,9 @@ function auto_tech:run()
         self:run_phase(self.verify_all_techs_are_reachable, "verifing all techs are reachable (5/12)")
         self:run_phase(self.calculate_transitive_reduction, "transitive reduction calculation (6/12)")
         self:run_phase(self.set_tech_prerequisites, "tech prerequisites setting (7/12)")
-        self:run_phase(self.set_tech_unit, "tech cost setting (8/12)")
         self:run_phase(self.set_tech_order, "tech order setting (9/12)")
         self:run_phase(self.set_science_packs, "science packs setting (10/12)")
+        self:run_phase(self.set_tech_unit, "tech cost setting (8/12)")
         self:run_phase(self.determine_essential_technologies, "determining essential techs (11/12)")
         self:run_phase(self.serialize_cache_file, "cache file output (12/12)")
     end, "autotech")
@@ -368,6 +368,9 @@ function auto_tech:set_tech_unit()
     local exponent = self.configuration.tech_cost_exponent
     local victory_node = self.technology_nodes:find_technology_node(self.dependency_graph.victory_node)
     local max_depth = victory_node.depth - 1
+    local total_sciece_cost = 0
+    local depths_of_science_packs = {}
+    
 
     if max_depth <= 0 then
         error("victory technology has a depth of " .. max_depth .. "\n" .. serpent.block(victory_node))
@@ -389,21 +392,66 @@ function auto_tech:set_tech_unit()
         end
         error()
     end
-
+    
     self.technology_nodes:for_all_nodes(function(technology_node)
         local factorio_tech = technology_node.object_node.object
+        local science_pack_unlocked_by_this_tech = data.raw.tool[technology_node.object_node.object.name]
+        if science_pack_unlocked_by_this_tech then
+            if factorio_tech.name == "military-science-pack" then
+                if verbose_logging then
+                    log("Depth of a military science pack tech is " .. technology_node.depth)
+                end
+                goto continue
+            end
+            depths_of_science_packs[#depths_of_science_packs+1]=technology_node.depth
+            if verbose_logging then
+                log("Depth of a new science pack tech is " .. depths_of_science_packs[#depths_of_science_packs])
+            end
+            ::continue::
+        end
+    end)
+
+    table.sort(depths_of_science_packs)
+    for i,pack_depth in pairs(depths_of_science_packs) do
+        if verbose_logging then
+                log("Depth of a new science pack tech is " .. pack_depth)
+        end
+    end
+    
+
+    self.technology_nodes:for_all_nodes(function(technology_node) 
+        local factorio_tech = technology_node.object_node.object
+        
         if factorio_tech.research_trigger then return end
         factorio_tech.unit = factorio_tech.unit or {}
-        local depth_percent = (technology_node.depth / max_depth)
+
+        local relative_depth_in_science_tier = technology_node.depth
+        for i,pack_depth in pairs(depths_of_science_packs) do
+            if pack_depth >= technology_node.depth then
+                if i>2 then
+                    relative_depth_in_science_tier = relative_depth_in_science_tier - depths_of_science_packs[i-1]
+                end
+                break
+            end
+        end
+
+        local depth_percent = ((technology_node.depth - (depths_of_science_packs[1]+1))/ (max_depth- (depths_of_science_packs[1]+1)))
         factorio_tech.unit.count = start + (victory - start) * (depth_percent ^ exponent)
 
         if factorio_tech.unit.count == math.huge then
             error(depth_percent .. "\n" .. serpent.block(factorio_tech) .. serpent.block(self.configuration))
         end
         if verbose_logging then
-            log("Technology " .. factorio_tech.name .. " has a depth of " .. technology_node.depth .. ". Calculated science pack cost is " .. factorio_tech.unit.count)
+            log("Technology " .. factorio_tech.name .. " has a depth of " .. technology_node.depth .. " and a relative depth from the last science pack " .. relative_depth_in_science_tier .. ". Calculated science pack cost is " .. factorio_tech.unit.count)
+        end
+        if relative_depth_in_science_tier < 6 and relative_depth_in_science_tier > 0 then
+            x= (relative_depth_in_science_tier-1)/4.0
+            factorio_tech.unit.count = factorio_tech.unit.count * (0.5*(1.0-x)+x)
         end
         factorio_tech.unit.count = math.max(cost_rounding(factorio_tech.unit.count), 1)
+        total_sciece_cost = total_sciece_cost + factorio_tech.unit.count
+        
+
 
         local final_multiplier = self.configuration.tech_cost_additional_multipliers[factorio_tech.name]
         if final_multiplier then
@@ -419,6 +467,9 @@ function auto_tech:set_tech_unit()
             self:write_to_cache_file(technology_node, "count", factorio_tech.unit.count)
         end
     end)
+    if verbose_logging then
+            log("Total cost of non-infinite technologies is: " .. total_sciece_cost )
+        end
 end
 
 function auto_tech:set_tech_order()
